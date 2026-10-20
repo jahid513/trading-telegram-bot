@@ -2,25 +2,37 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const TelegramBotPkg = require('node-telegram-bot-api');
-const TelegramBot = typeof TelegramBotPkg === 'function' ? TelegramBotPkg : (TelegramBotPkg.default || TelegramBotPkg);
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
-// ১. এক্সপ্রেস অ্যাপ ইনিশিয়ালাইজেশন
+// ১. টেলিগ্রাম বট কনস্ট্রাক্টর হ্যান্ডলিং (Node 24 ও সব ধরনের মডিউল এক্সপোর্ট সেফ)
+const TelegramBotPkg = require('node-telegram-bot-api');
+let TelegramBot = TelegramBotPkg;
+if (typeof TelegramBot !== 'function') {
+    if (typeof TelegramBotPkg.TelegramBot === 'function') {
+        TelegramBot = TelegramBotPkg.TelegramBot;
+    } else if (typeof TelegramBotPkg.default === 'function') {
+        TelegramBot = TelegramBotPkg.default;
+    } else {
+        const found = Object.values(TelegramBotPkg).find(v => typeof v === 'function');
+        if (found) TelegramBot = found;
+    }
+}
+
+// ২. এক্সপ্রেস অ্যাপ ইনিশিয়ালাইজেশন
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ২. Multer মেমোরি স্টোরেজ সেটআপ (ছবি ফায়ারবেসে জমা না হয়ে মেমোরিতে প্রসেস হবে)
+// ৩. Multer মেমোরি স্টোরেজ সেটআপ (ছবি মেমোরিতে প্রসেস হবে, স্টোরেজ খরচ হবে না)
 const storage = multer.memoryStorage();
 const upload = multer({
     storage: storage,
     limits: { fileSize: 10 * 1024 * 1024 } // সর্বোচ্চ ১০ মেগাবাইট ফাইল
 });
 
-// ৩. ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন
+// ৪. ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন
 let serviceAccount;
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -43,23 +55,29 @@ try {
 
 const db = getFirestore();
 
-// ৪. টেলিগ্রাম বট ইনিশিয়ালাইজেশন (TELEGRAM_BOT_TOKEN অথবা BOT_TOKEN উভয়েই কাজ করবে)
+// ৫. টেলিগ্রাম বট ইনিশিয়ালাইজেশন
 const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const adminChatId = process.env.ADMIN_CHAT_ID;
 
-if (!token) {
-    console.error("WARNING: TELEGRAM_BOT_TOKEN or BOT_TOKEN missing in environment variables!");
+let bot = null;
+if (token && typeof TelegramBot === 'function') {
+    bot = new TelegramBot(token, { polling: true });
+    
+    bot.on('polling_error', (error) => {
+        console.warn("Telegram Polling Notice:", error.message);
+    });
+
+    console.log("Telegram Bot Engine Started...");
+} else {
+    console.error("WARNING: Telegram Bot Token missing or Constructor invalid!");
 }
 
-const bot = new TelegramBot(token, { polling: true });
-console.log("Telegram Bot Engine Started...");
-
-// ৫. UptimeRobot মনিটরিং রুট (200 OK নিশ্চিত রাখতে)
+// ৬. Uptime ও হেলথ চেক রুট (Render ও UptimeRobot-এর জন্য)
 app.get('/', (req, res) => {
-    res.status(200).send('Server is running');
+    res.status(200).send('JH Trading VIP Bot Server is Running');
 });
 
-// ৬. Quotex Webhook Postback রিসিভার
+// ৭. Quotex Webhook Postback রিসিভার
 app.get('/quotex-webhook', async (req, res) => {
     try {
         const { uid, deposit, status } = req.query;
@@ -101,7 +119,7 @@ app.get('/quotex-webhook', async (req, res) => {
     }
 });
 
-// ৭. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (টেলিগ্রামে সরাসরি ছবি ও ক্যাপশন পাঠানো)
+// ৮. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (সরাসরি টেলিগ্রামে ছবি পাঠানো)
 app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     try {
         const { userId, email, txId, plan, method } = req.body;
@@ -133,20 +151,22 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
             ]
         };
 
-        if (photoFile && photoFile.buffer) {
-            await bot.sendPhoto(adminChatId, photoFile.buffer, {
-                caption: captionText,
-                parse_mode: 'HTML',
-                reply_markup: inlineKeyboard
-            }, {
-                filename: photoFile.originalname || 'payment_proof.jpg',
-                contentType: photoFile.mimetype || 'image/jpeg'
-            });
-        } else {
-            await bot.sendMessage(adminChatId, captionText, {
-                parse_mode: 'HTML',
-                reply_markup: inlineKeyboard
-            });
+        if (bot) {
+            if (photoFile && photoFile.buffer) {
+                await bot.sendPhoto(adminChatId, photoFile.buffer, {
+                    caption: captionText,
+                    parse_mode: 'HTML',
+                    reply_markup: inlineKeyboard
+                }, {
+                    filename: photoFile.originalname || 'payment_proof.jpg',
+                    contentType: photoFile.mimetype || 'image/jpeg'
+                });
+            } else {
+                await bot.sendMessage(adminChatId, captionText, {
+                    parse_mode: 'HTML',
+                    reply_markup: inlineKeyboard
+                });
+            }
         }
 
         res.status(200).json({ success: true, message: "Payment notification sent to Telegram" });
@@ -156,91 +176,92 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     }
 });
 
-// ৮. টেলিগ্রাম বট বাটন অ্যাকশন হ্যান্ডলার (Approve / Reject)
-bot.on('callback_query', async (query) => {
-    const data = query.data;
-    const chatId = query.message.chat.id;
+// ৯. টেলিগ্রাম বট বাটন অ্যাকশন হ্যান্ডলার (Approve / Reject)
+if (bot) {
+    bot.on('callback_query', async (query) => {
+        const data = query.data;
+        const chatId = query.message.chat.id;
 
-    try {
-        if (data.startsWith('approve_')) {
-            const parts = data.split('_');
-            const type = parts[1]; // '7', '30', or 'life'
-            const targetEmail = parts.slice(2).join('_');
+        try {
+            if (data.startsWith('approve_')) {
+                const parts = data.split('_');
+                const type = parts[1]; // '7', '30', or 'life'
+                const targetEmail = parts.slice(2).join('_');
 
-            const userSnap = await db.collection('users').where('email', '==', targetEmail).limit(1).get();
-            if (userSnap.empty) {
-                return bot.sendMessage(chatId, `❌ ইউজার পাওয়া যায়নি: ${targetEmail}`);
+                const userSnap = await db.collection('users').where('email', '==', targetEmail).limit(1).get();
+                if (userSnap.empty) {
+                    return bot.sendMessage(chatId, `❌ ইউজার পাওয়া যায়নি: ${targetEmail}`);
+                }
+
+                const userDoc = userSnap.docs[0];
+                let updatePayload = {
+                    vipStatus: true,
+                    isBanned: false
+                };
+
+                let durationMsg = "";
+                if (type === '7') {
+                    const expiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+                    updatePayload.vipExpiresAt = expiry.toISOString();
+                    durationMsg = "৭ দিনের VIP অ্যাক্সেস";
+                } else if (type === '30') {
+                    const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+                    updatePayload.vipExpiresAt = expiry.toISOString();
+                    durationMsg = "৩০ দিনের VIP অ্যাক্সেস";
+                } else if (type === 'life') {
+                    updatePayload.vipExpiresAt = null;
+                    durationMsg = "লাইফটাইম (Lifetime) VIP অ্যাক্সেস";
+                }
+
+                await userDoc.ref.update(updatePayload);
+
+                const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
+                paySnap.forEach(pDoc => pDoc.ref.update({ status: 'approved' }));
+
+                await bot.sendMessage(chatId, `✅ <b>সফল!</b>\nইউজার <code>${targetEmail}</code>-কে <b>${durationMsg}</b> দেওয়া হয়েছে।`, { parse_mode: 'HTML' });
+                await bot.answerCallbackQuery(query.id, { text: "Approved Successfully!" });
+
+            } else if (data.startsWith('reject_')) {
+                const targetEmail = data.replace('reject_', '');
+                
+                const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
+                paySnap.forEach(pDoc => pDoc.ref.update({ status: 'rejected' }));
+
+                await bot.sendMessage(chatId, `❌ ইউজার <code>${targetEmail}</code>-এর পেমেন্ট রিজেক্ট করা হয়েছে।`, { parse_mode: 'HTML' });
+                await bot.answerCallbackQuery(query.id, { text: "Rejected!" });
             }
-
-            const userDoc = userSnap.docs[0];
-            let updatePayload = {
-                vipStatus: true,
-                isBanned: false
-            };
-
-            let durationMsg = "";
-            if (type === '7') {
-                const expiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-                updatePayload.vipExpiresAt = expiry.toISOString();
-                durationMsg = "৭ দিনের VIP অ্যাক্সেস";
-            } else if (type === '30') {
-                const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-                updatePayload.vipExpiresAt = expiry.toISOString();
-                durationMsg = "৩০ দিনের VIP অ্যাক্সেস";
-            } else if (type === 'life') {
-                updatePayload.vipExpiresAt = null;
-                durationMsg = "লাইফটাইম (Lifetime) VIP অ্যাক্সেস";
-            }
-
-            await userDoc.ref.update(updatePayload);
-
-            const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
-            paySnap.forEach(pDoc => pDoc.ref.update({ status: 'approved' }));
-
-            await bot.sendMessage(chatId, `✅ <b>সফল!</b>\nইউজার <code>${targetEmail}</code>-কে <b>${durationMsg}</b> দেওয়া হয়েছে।`, { parse_mode: 'HTML' });
-            await bot.answerCallbackQuery(query.id, { text: "Approved Successfully!" });
-
-        } else if (data.startsWith('reject_')) {
-            const targetEmail = data.replace('reject_', '');
-            
-            const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
-            paySnap.forEach(pDoc => pDoc.ref.update({ status: 'rejected' }));
-
-            await bot.sendMessage(chatId, `❌ ইউজার <code>${targetEmail}</code>-এর পেমেন্ট রিজেক্ট করা হয়েছে।`, { parse_mode: 'HTML' });
-            await bot.answerCallbackQuery(query.id, { text: "Rejected!" });
+        } catch (e) {
+            console.error("Callback Query Error:", e.message);
+            bot.sendMessage(chatId, `ত্রুটি: ${e.message}`);
         }
-    } catch (e) {
-        console.error("Callback Query Error:", e.message);
-        bot.sendMessage(chatId, `ত্রুটি: ${e.message}`);
-    }
-});
+    });
 
-// ৯. অ্যাডমিন কমান্ড তালিকা
-bot.onText(/\/start/, (msg) => {
-    if (String(msg.chat.id) !== String(adminChatId)) return;
-    const welcome = 
+    // অ্যাডমিন কমান্ডসমূহ
+    bot.onText(/\/start/, (msg) => {
+        if (String(msg.chat.id) !== String(adminChatId)) return;
+        const welcome = 
 `👋 <b>JH Trading VIP Admin Bot চালু আছে!</b>
 
 📌 <b>কমান্ড তালিকা:</b>
-• <code>/check &lt;email&gt;</code> - ইউজারের প্রোফাইল ও ডিপোজিট স্ট্যাটাস দেখুন
-• <code>/approve &lt;email&gt; &lt;days&gt;</code> - সরাসরি VIP মেয়াদ দিন (উদা: /approve user@gmail.com 30)
+• <code>/check &lt;email&gt;</code> - ইউজারের প্রোফাইল ও তথ্য দেখুন
+• <code>/approve &lt;email&gt; &lt;days&gt;</code> - সরাসরি VIP দিন (উদা: /approve user@gmail.com 30)
 • <code>/ban &lt;email&gt;</code> - ইউজার ব্যান করুন
 • <code>/unban &lt;email&gt;</code> - ইউজার আনব্যান করুন
 • <code>/stats</code> - মোট ইউজার ও VIP সংখ্যা দেখুন
 
 🔔 সাইটে পেমেন্ট সাবমিট করলে স্ক্রিনশট ও বাটনসহ রিয়েল-টাইম নোটিফিকেশন আসবে।`;
-    bot.sendMessage(msg.chat.id, welcome, { parse_mode: 'HTML' });
-});
+        bot.sendMessage(msg.chat.id, welcome, { parse_mode: 'HTML' });
+    });
 
-bot.onText(/\/check (.+)/, async (msg, match) => {
-    if (String(msg.chat.id) !== String(adminChatId)) return;
-    const email = match[1].trim();
-    try {
-        const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-        if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ কোনো ইউজার পাওয়া যায়নি।");
+    bot.onText(/\/check (.+)/, async (msg, match) => {
+        if (String(msg.chat.id) !== String(adminChatId)) return;
+        const email = match[1].trim();
+        try {
+            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ কোনো ইউজার পাওয়া যায়নি।");
 
-        const u = snap.docs[0].data();
-        const info = 
+            const u = snap.docs[0].data();
+            const info = 
 `📋 <b>ইউজার প্রোফাইল:</b>
 • নাম: ${u.name || 'N/A'}
 • ইমেইল: <code>${u.email}</code>
@@ -249,78 +270,79 @@ bot.onText(/\/check (.+)/, async (msg, match) => {
 • VIP স্ট্যাটাস: ${u.vipStatus ? 'ACTIVE 🟢' : 'INACTIVE 🔴'}
 • VIP মেয়াদ: ${u.vipExpiresAt ? new Date(u.vipExpiresAt).toLocaleString() : 'LIFETIME'}
 • ব্যান স্ট্যাটাস: ${u.isBanned ? 'BANNED 🚫' : 'ACTIVE'}`;
-        bot.sendMessage(msg.chat.id, info, { parse_mode: 'HTML' });
-    } catch (err) {
-        bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-    }
-});
+            bot.sendMessage(msg.chat.id, info, { parse_mode: 'HTML' });
+        } catch (err) {
+            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
+        }
+    });
 
-bot.onText(/\/approve (\S+) (\d+)/, async (msg, match) => {
-    if (String(msg.chat.id) !== String(adminChatId)) return;
-    const email = match[1].trim();
-    const days = parseInt(match[2]);
-    try {
-        const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-        if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
+    bot.onText(/\/approve (\S+) (\d+)/, async (msg, match) => {
+        if (String(msg.chat.id) !== String(adminChatId)) return;
+        const email = match[1].trim();
+        const days = parseInt(match[2]);
+        try {
+            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
 
-        const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-        await snap.docs[0].ref.update({
-            vipStatus: true,
-            vipExpiresAt: expiry.toISOString(),
-            isBanned: false
-        });
+            const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+            await snap.docs[0].ref.update({
+                vipStatus: true,
+                vipExpiresAt: expiry.toISOString(),
+                isBanned: false
+            });
 
-        bot.sendMessage(msg.chat.id, `✅ <code>${email}</code>-কে ${days} দিনের জন্য VIP অ্যাক্সেস দেওয়া হয়েছে।`, { parse_mode: 'HTML' });
-    } catch (err) {
-        bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-    }
-});
+            bot.sendMessage(msg.chat.id, `✅ <code>${email}</code>-কে ${days} দিনের জন্য VIP অ্যাক্সেস দেওয়া হয়েছে।`, { parse_mode: 'HTML' });
+        } catch (err) {
+            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
+        }
+    });
 
-bot.onText(/\/ban (.+)/, async (msg, match) => {
-    if (String(msg.chat.id) !== String(adminChatId)) return;
-    const email = match[1].trim();
-    try {
-        const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-        if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
+    bot.onText(/\/ban (.+)/, async (msg, match) => {
+        if (String(msg.chat.id) !== String(adminChatId)) return;
+        const email = match[1].trim();
+        try {
+            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
 
-        await snap.docs[0].ref.update({ isBanned: true, vipStatus: false });
-        bot.sendMessage(msg.chat.id, `🚫 ইউজার ব্যান করা হয়েছে:\n<code>${email}</code>`, { parse_mode: 'HTML' });
-    } catch (err) {
-        bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-    }
-});
+            await snap.docs[0].ref.update({ isBanned: true, vipStatus: false });
+            bot.sendMessage(msg.chat.id, `🚫 ইউজার ব্যান করা হয়েছে:\n<code>${email}</code>`, { parse_mode: 'HTML' });
+        } catch (err) {
+            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
+        }
+    });
 
-bot.onText(/\/unban (.+)/, async (msg, match) => {
-    if (String(msg.chat.id) !== String(adminChatId)) return;
-    const email = match[1].trim();
-    try {
-        const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-        if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
+    bot.onText(/\/unban (.+)/, async (msg, match) => {
+        if (String(msg.chat.id) !== String(adminChatId)) return;
+        const email = match[1].trim();
+        try {
+            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
 
-        await snap.docs[0].ref.update({ isBanned: false });
-        bot.sendMessage(msg.chat.id, `✅ ইউজার আনব্যান করা হয়েছে:\n<code>${email}</code>`, { parse_mode: 'HTML' });
-    } catch (err) {
-        bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-    }
-});
+            await snap.docs[0].ref.update({ isBanned: false });
+            bot.sendMessage(msg.chat.id, `✅ ইউজার আনব্যান করা হয়েছে:\n<code>${email}</code>`, { parse_mode: 'HTML' });
+        } catch (err) {
+            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
+        }
+    });
 
-bot.onText(/\/stats/, async (msg) => {
-    if (String(msg.chat.id) !== String(adminChatId)) return;
-    try {
-        const allUsers = await db.collection('users').get();
-        const vipUsers = await db.collection('users').where('vipStatus', '==', true).get();
-        const quotexTraders = await db.collection('quotex_traders').get();
+    bot.onText(/\/stats/, async (msg) => {
+        if (String(msg.chat.id) !== String(adminChatId)) return;
+        try {
+            const allUsers = await db.collection('users').get();
+            const vipUsers = await db.collection('users').where('vipStatus', '==', true).get();
+            const quotexTraders = await db.collection('quotex_traders').get();
 
-        const statsMsg = 
+            const statsMsg = 
 `📊 <b>JH Trading Zone পরিসংখ্যান:</b>
 • মোট রেজিস্টার্ড ইউজার: <b>${allUsers.size}</b> জন
 • সক্রিয় VIP মেম্বার: <b>${vipUsers.size}</b> জন
 • ভেরিফাইড কোটেক্স ট্রেডার: <b>${quotexTraders.size}</b> জন`;
-        bot.sendMessage(msg.chat.id, statsMsg, { parse_mode: 'HTML' });
-    } catch (err) {
-        bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-    }
-});
+            bot.sendMessage(msg.chat.id, statsMsg, { parse_mode: 'HTML' });
+        } catch (err) {
+            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
+        }
+    });
+}
 
 // ১০. সার্ভার পোর্ট লিসেন
 const PORT = process.env.PORT || 3000;
