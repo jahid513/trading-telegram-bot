@@ -2,7 +2,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
-const TelegramBot = require('node-telegram-bot-api');
+const TelegramBotPkg = require('node-telegram-bot-api');
+const TelegramBot = typeof TelegramBotPkg === 'function' ? TelegramBotPkg : (TelegramBotPkg.default || TelegramBotPkg);
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
