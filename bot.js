@@ -5,34 +5,20 @@ const multer = require('multer');
 const { initializeApp, cert, getApps } = require('firebase-admin/app');
 const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
-// ১. টেলিগ্রাম বট কনস্ট্রাক্টর হ্যান্ডলিং (Node 24 ও সব ধরনের মডিউল এক্সপোর্ট সেফ)
-const TelegramBotPkg = require('node-telegram-bot-api');
-let TelegramBot = TelegramBotPkg;
-if (typeof TelegramBot !== 'function') {
-    if (typeof TelegramBotPkg.TelegramBot === 'function') {
-        TelegramBot = TelegramBotPkg.TelegramBot;
-    } else if (typeof TelegramBotPkg.default === 'function') {
-        TelegramBot = TelegramBotPkg.default;
-    } else {
-        const found = Object.values(TelegramBotPkg).find(v => typeof v === 'function');
-        if (found) TelegramBot = found;
-    }
-}
-
-// ২. এক্সপ্রেস অ্যাপ ইনিশিয়ালাইজেশন
+// ১. এক্সপ্রেস অ্যাপ ইনিশিয়ালাইজেশন
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ৩. Multer মেমোরি স্টোরেজ সেটআপ (ছবি মেমোরিতে প্রসেস হবে, স্টোরেজ খরচ হবে না)
+// ২. Multer মেমোরি স্টোরেজ সেটআপ (ছবি ফায়ারবেসে জমা না হয়ে র‍্যামে প্রসেস হবে)
 const storage = multer.memoryStorage();
 const upload = multer({
     storage: storage,
     limits: { fileSize: 10 * 1024 * 1024 } // সর্বোচ্চ ১০ মেগাবাইট ফাইল
 });
 
-// ৪. ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন
+// ৩. ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন
 let serviceAccount;
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
@@ -42,7 +28,7 @@ try {
     } else {
         serviceAccount = require('./serviceAccountKey.json');
     }
-    
+
     if (!getApps().length) {
         initializeApp({
             credential: cert(serviceAccount)
@@ -55,24 +41,70 @@ try {
 
 const db = getFirestore();
 
-// ৫. টেলিগ্রাম বট ইনিশিয়ালাইজেশন
+// ৪. পরিবেশ ভ্যারিয়েবল ও টেলিগ্রাম ক্রেডেনশিয়াল
 const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const adminChatId = process.env.ADMIN_CHAT_ID;
 
-let bot = null;
-if (token && typeof TelegramBot === 'function') {
-    bot = new TelegramBot(token, { polling: true });
-    
-    bot.on('polling_error', (error) => {
-        console.warn("Telegram Polling Notice:", error.message);
-    });
+// ৫. সরাসরি Telegram REST API ফাংশনসমূহ (কোনো প্যাকেজ ছাড়া)
+async function sendTelegramMessage(chatId, text, replyMarkup = null) {
+    if (!token) return;
+    try {
+        const payload = {
+            chat_id: chatId,
+            text: text,
+            parse_mode: 'HTML'
+        };
+        if (replyMarkup) payload.reply_markup = replyMarkup;
 
-    console.log("Telegram Bot Engine Started...");
-} else {
-    console.error("WARNING: Telegram Bot Token missing or Constructor invalid!");
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+    } catch (e) {
+        console.error("sendTelegramMessage Error:", e.message);
+    }
 }
 
-// ৬. Uptime ও হেলথ চেক রুট (Render ও UptimeRobot-এর জন্য)
+async function sendTelegramPhoto(chatId, photoBuffer, filename, mimetype, caption, replyMarkup = null) {
+    if (!token) return;
+    try {
+        const formData = new FormData();
+        formData.append('chat_id', String(chatId));
+        if (caption) {
+            formData.append('caption', caption);
+            formData.append('parse_mode', 'HTML');
+        }
+        if (replyMarkup) {
+            formData.append('reply_markup', JSON.stringify(replyMarkup));
+        }
+
+        const blob = new Blob([photoBuffer], { type: mimetype || 'image/jpeg' });
+        formData.append('photo', blob, filename || 'payment_proof.jpg');
+
+        await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+            method: 'POST',
+            body: formData
+        });
+    } catch (e) {
+        console.error("sendTelegramPhoto Error:", e.message);
+    }
+}
+
+async function answerCallbackQuery(queryId, text) {
+    if (!token) return;
+    try {
+        await fetch(`https://api.telegram.org/bot${token}/answerCallbackQuery`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ callback_query_id: queryId, text: text })
+        });
+    } catch (e) {
+        console.error("answerCallbackQuery Error:", e.message);
+    }
+}
+
+// ৬. UptimeRobot মনিটরিং রুট (২৪ ঘণ্টা সচল রাখতে)
 app.get('/', (req, res) => {
     res.status(200).send('JH Trading VIP Bot Server is Running');
 });
@@ -119,7 +151,7 @@ app.get('/quotex-webhook', async (req, res) => {
     }
 });
 
-// ৮. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (সরাসরি টেলিগ্রামে ছবি পাঠানো)
+// ৮. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (টেলিগ্রামে সরাসরি ফটো ও বাটন প্রেরণ)
 app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     try {
         const { userId, email, txId, plan, method } = req.body;
@@ -151,22 +183,17 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
             ]
         };
 
-        if (bot) {
-            if (photoFile && photoFile.buffer) {
-                await bot.sendPhoto(adminChatId, photoFile.buffer, {
-                    caption: captionText,
-                    parse_mode: 'HTML',
-                    reply_markup: inlineKeyboard
-                }, {
-                    filename: photoFile.originalname || 'payment_proof.jpg',
-                    contentType: photoFile.mimetype || 'image/jpeg'
-                });
-            } else {
-                await bot.sendMessage(adminChatId, captionText, {
-                    parse_mode: 'HTML',
-                    reply_markup: inlineKeyboard
-                });
-            }
+        if (photoFile && photoFile.buffer) {
+            await sendTelegramPhoto(
+                adminChatId,
+                photoFile.buffer,
+                photoFile.originalname || 'payment_proof.jpg',
+                photoFile.mimetype || 'image/jpeg',
+                captionText,
+                inlineKeyboard
+            );
+        } else {
+            await sendTelegramMessage(adminChatId, captionText, inlineKeyboard);
         }
 
         res.status(200).json({ success: true, message: "Payment notification sent to Telegram" });
@@ -176,30 +203,31 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     }
 });
 
-// ৯. টেলিগ্রাম বট বাটন অ্যাকশন হ্যান্ডলার (Approve / Reject)
-if (bot) {
-    bot.on('callback_query', async (query) => {
-        const data = query.data;
-        const chatId = query.message.chat.id;
+// ৯. টেলিগ্রাম ব্যাকগ্রাউন্ড পোলিং লুপ (বাটন ক্লিক ও কমান্ড হ্যান্ডলার)
+let lastUpdateId = 0;
+async function processUpdate(update) {
+    try {
+        // বাটন ক্লিকের হ্যান্ডলিং (Approve / Reject)
+        if (update.callback_query) {
+            const query = update.callback_query;
+            const data = query.data;
+            const chatId = query.message.chat.id;
 
-        try {
             if (data.startsWith('approve_')) {
                 const parts = data.split('_');
-                const type = parts[1]; // '7', '30', or 'life'
+                const type = parts[1];
                 const targetEmail = parts.slice(2).join('_');
 
                 const userSnap = await db.collection('users').where('email', '==', targetEmail).limit(1).get();
                 if (userSnap.empty) {
-                    return bot.sendMessage(chatId, `❌ ইউজার পাওয়া যায়নি: ${targetEmail}`);
+                    await sendTelegramMessage(chatId, `❌ ইউজার পাওয়া যায়নি: ${targetEmail}`);
+                    return;
                 }
 
                 const userDoc = userSnap.docs[0];
-                let updatePayload = {
-                    vipStatus: true,
-                    isBanned: false
-                };
-
+                let updatePayload = { vipStatus: true, isBanned: false };
                 let durationMsg = "";
+
                 if (type === '7') {
                     const expiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
                     updatePayload.vipExpiresAt = expiry.toISOString();
@@ -218,50 +246,48 @@ if (bot) {
                 const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
                 paySnap.forEach(pDoc => pDoc.ref.update({ status: 'approved' }));
 
-                await bot.sendMessage(chatId, `✅ <b>সফল!</b>\nইউজার <code>${targetEmail}</code>-কে <b>${durationMsg}</b> দেওয়া হয়েছে।`, { parse_mode: 'HTML' });
-                await bot.answerCallbackQuery(query.id, { text: "Approved Successfully!" });
+                await sendTelegramMessage(chatId, `✅ <b>সফল!</b>\nইউজার <code>${targetEmail}</code>-কে <b>${durationMsg}</b> দেওয়া হয়েছে।`);
+                await answerCallbackQuery(query.id, "Approved Successfully!");
 
             } else if (data.startsWith('reject_')) {
                 const targetEmail = data.replace('reject_', '');
-                
                 const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
                 paySnap.forEach(pDoc => pDoc.ref.update({ status: 'rejected' }));
 
-                await bot.sendMessage(chatId, `❌ ইউজার <code>${targetEmail}</code>-এর পেমেন্ট রিজেক্ট করা হয়েছে।`, { parse_mode: 'HTML' });
-                await bot.answerCallbackQuery(query.id, { text: "Rejected!" });
+                await sendTelegramMessage(chatId, `❌ ইউজার <code>${targetEmail}</code>-এর পেমেন্ট রিজেক্ট করা হয়েছে।`);
+                await answerCallbackQuery(query.id, "Rejected!");
             }
-        } catch (e) {
-            console.error("Callback Query Error:", e.message);
-            bot.sendMessage(chatId, `ত্রুটি: ${e.message}`);
         }
-    });
 
-    // অ্যাডমিন কমান্ডসমূহ
-    bot.onText(/\/start/, (msg) => {
-        if (String(msg.chat.id) !== String(adminChatId)) return;
-        const welcome = 
+        // অ্যাডমিন কমান্ডের হ্যান্ডলিং (/start, /check, /approve, /ban, /unban, /stats)
+        if (update.message && update.message.text) {
+            const msg = update.message;
+            const text = msg.text.trim();
+            const chatId = msg.chat.id;
+
+            if (String(chatId) !== String(adminChatId)) return;
+
+            if (text === '/start') {
+                const welcome = 
 `👋 <b>JH Trading VIP Admin Bot চালু আছে!</b>
 
 📌 <b>কমান্ড তালিকা:</b>
-• <code>/check &lt;email&gt;</code> - ইউজারের প্রোফাইল ও তথ্য দেখুন
+• <code>/check &lt;email&gt;</code> - ইউজারের তথ্য ও স্ট্যাটাস দেখুন
 • <code>/approve &lt;email&gt; &lt;days&gt;</code> - সরাসরি VIP দিন (উদা: /approve user@gmail.com 30)
 • <code>/ban &lt;email&gt;</code> - ইউজার ব্যান করুন
 • <code>/unban &lt;email&gt;</code> - ইউজার আনব্যান করুন
 • <code>/stats</code> - মোট ইউজার ও VIP সংখ্যা দেখুন
 
 🔔 সাইটে পেমেন্ট সাবমিট করলে স্ক্রিনশট ও বাটনসহ রিয়েল-টাইম নোটিফিকেশন আসবে।`;
-        bot.sendMessage(msg.chat.id, welcome, { parse_mode: 'HTML' });
-    });
-
-    bot.onText(/\/check (.+)/, async (msg, match) => {
-        if (String(msg.chat.id) !== String(adminChatId)) return;
-        const email = match[1].trim();
-        try {
-            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ কোনো ইউজার পাওয়া যায়নি।");
-
-            const u = snap.docs[0].data();
-            const info = 
+                await sendTelegramMessage(chatId, welcome);
+            } else if (text.startsWith('/check ')) {
+                const email = text.replace('/check ', '').trim();
+                const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+                if (snap.empty) {
+                    await sendTelegramMessage(chatId, "❌ কোনো ইউজার পাওয়া যায়নি।");
+                } else {
+                    const u = snap.docs[0].data();
+                    const info = 
 `📋 <b>ইউজার প্রোফাইল:</b>
 • নাম: ${u.name || 'N/A'}
 • ইমেইল: <code>${u.email}</code>
@@ -270,82 +296,89 @@ if (bot) {
 • VIP স্ট্যাটাস: ${u.vipStatus ? 'ACTIVE 🟢' : 'INACTIVE 🔴'}
 • VIP মেয়াদ: ${u.vipExpiresAt ? new Date(u.vipExpiresAt).toLocaleString() : 'LIFETIME'}
 • ব্যান স্ট্যাটাস: ${u.isBanned ? 'BANNED 🚫' : 'ACTIVE'}`;
-            bot.sendMessage(msg.chat.id, info, { parse_mode: 'HTML' });
-        } catch (err) {
-            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-        }
-    });
-
-    bot.onText(/\/approve (\S+) (\d+)/, async (msg, match) => {
-        if (String(msg.chat.id) !== String(adminChatId)) return;
-        const email = match[1].trim();
-        const days = parseInt(match[2]);
-        try {
-            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
-
-            const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
-            await snap.docs[0].ref.update({
-                vipStatus: true,
-                vipExpiresAt: expiry.toISOString(),
-                isBanned: false
-            });
-
-            bot.sendMessage(msg.chat.id, `✅ <code>${email}</code>-কে ${days} দিনের জন্য VIP অ্যাক্সেস দেওয়া হয়েছে।`, { parse_mode: 'HTML' });
-        } catch (err) {
-            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-        }
-    });
-
-    bot.onText(/\/ban (.+)/, async (msg, match) => {
-        if (String(msg.chat.id) !== String(adminChatId)) return;
-        const email = match[1].trim();
-        try {
-            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
-
-            await snap.docs[0].ref.update({ isBanned: true, vipStatus: false });
-            bot.sendMessage(msg.chat.id, `🚫 ইউজার ব্যান করা হয়েছে:\n<code>${email}</code>`, { parse_mode: 'HTML' });
-        } catch (err) {
-            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-        }
-    });
-
-    bot.onText(/\/unban (.+)/, async (msg, match) => {
-        if (String(msg.chat.id) !== String(adminChatId)) return;
-        const email = match[1].trim();
-        try {
-            const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-            if (snap.empty) return bot.sendMessage(msg.chat.id, "❌ ইউজার পাওয়া যায়নি।");
-
-            await snap.docs[0].ref.update({ isBanned: false });
-            bot.sendMessage(msg.chat.id, `✅ ইউজার আনব্যান করা হয়েছে:\n<code>${email}</code>`, { parse_mode: 'HTML' });
-        } catch (err) {
-            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
-        }
-    });
-
-    bot.onText(/\/stats/, async (msg) => {
-        if (String(msg.chat.id) !== String(adminChatId)) return;
-        try {
-            const allUsers = await db.collection('users').get();
-            const vipUsers = await db.collection('users').where('vipStatus', '==', true).get();
-            const quotexTraders = await db.collection('quotex_traders').get();
-
-            const statsMsg = 
+                    await sendTelegramMessage(chatId, info);
+                }
+            } else if (text.startsWith('/approve ')) {
+                const parts = text.split(' ');
+                if (parts.length >= 3) {
+                    const email = parts[1].trim();
+                    const days = parseInt(parts[2]);
+                    const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+                    if (snap.empty) {
+                        await sendTelegramMessage(chatId, "❌ ইউজার পাওয়া যায়নি।");
+                    } else {
+                        const expiry = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+                        await snap.docs[0].ref.update({
+                            vipStatus: true,
+                            vipExpiresAt: expiry.toISOString(),
+                            isBanned: false
+                        });
+                        await sendTelegramMessage(chatId, `✅ <code>${email}</code>-কে ${days} দিনের জন্য VIP অ্যাক্সেস দেওয়া হয়েছে।`);
+                    }
+                }
+            } else if (text.startsWith('/ban ')) {
+                const email = text.replace('/ban ', '').trim();
+                const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+                if (snap.empty) {
+                    await sendTelegramMessage(chatId, "❌ ইউজার পাওয়া যায়নি।");
+                } else {
+                    await snap.docs[0].ref.update({ isBanned: true, vipStatus: false });
+                    await sendTelegramMessage(chatId, `🚫 ইউজার ব্যান করা হয়েছে:\n<code>${email}</code>`);
+                }
+            } else if (text.startsWith('/unban ')) {
+                const email = text.replace('/unban ', '').trim();
+                const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+                if (snap.empty) {
+                    await sendTelegramMessage(chatId, "❌ ইউজার পাওয়া যায়নি।");
+                } else {
+                    await snap.docs[0].ref.update({ isBanned: false });
+                    await sendTelegramMessage(chatId, `✅ ইউজার আনব্যান করা হয়েছে:\n<code>${email}</code>`);
+                }
+            } else if (text === '/stats') {
+                const allUsers = await db.collection('users').get();
+                const vipUsers = await db.collection('users').where('vipStatus', '==', true).get();
+                const quotexTraders = await db.collection('quotex_traders').get();
+                const statsMsg = 
 `📊 <b>JH Trading Zone পরিসংখ্যান:</b>
 • মোট রেজিস্টার্ড ইউজার: <b>${allUsers.size}</b> জন
 • সক্রিয় VIP মেম্বার: <b>${vipUsers.size}</b> জন
 • ভেরিফাইড কোটেক্স ট্রেডার: <b>${quotexTraders.size}</b> জন`;
-            bot.sendMessage(msg.chat.id, statsMsg, { parse_mode: 'HTML' });
-        } catch (err) {
-            bot.sendMessage(msg.chat.id, `Error: ${err.message}`);
+                await sendTelegramMessage(chatId, statsMsg);
+            }
         }
-    });
+    } catch (err) {
+        console.error("processUpdate Error:", err.message);
+    }
 }
 
-// ১০. সার্ভার পোর্ট লিসেন
+async function startPolling() {
+    if (!token) {
+        console.error("CRITICAL: BOT_TOKEN or TELEGRAM_BOT_TOKEN missing!");
+        return;
+    }
+    console.log("Telegram REST Engine Running Smoothly...");
+    while (true) {
+        try {
+            const res = await fetch(`https://api.telegram.org/bot${token}/getUpdates?offset=${lastUpdateId}&timeout=25`);
+            const data = await res.json();
+            if (data && data.ok && Array.isArray(data.result)) {
+                for (const update of data.result) {
+                    lastUpdateId = update.update_id + 1;
+                    await processUpdate(update);
+                }
+            } else if (!data.ok) {
+                console.warn("Telegram Notice:", data.description);
+                await new Promise(r => setTimeout(r, 4000));
+            }
+        } catch (err) {
+            await new Promise(r => setTimeout(r, 3000));
+        }
+    }
+}
+
+// ১০. সার্ভার পোর্ট লিসেন ও ইঞ্জিন চালু
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`Backend Server running on port ${PORT}`);
+    startPolling();
 });
