@@ -11,7 +11,7 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ২. Multer মেমোরি স্টোরেজ সেটআপ (ছবি ফায়ারবেসে জমা না হয়ে র‍্যামে প্রসেস হবে)
+// ২. Multer মেমোরি স্টোরেজ সেটআপ (ছবি ফায়ারবেসে জমা না হয়ে মেমোরিতে প্রসেস হবে)
 const storage = multer.memoryStorage();
 const upload = multer({
     storage: storage,
@@ -45,7 +45,7 @@ const db = getFirestore();
 const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const adminChatId = process.env.ADMIN_CHAT_ID;
 
-// ৫. সরাসরি Telegram REST API ফাংশনসমূহ (কোনো প্যাকেজ ছাড়া)
+// ৫. সরাসরি Telegram REST API ফাংশনসমূহ
 async function sendTelegramMessage(chatId, text, replyMarkup = null) {
     if (!token) return;
     try {
@@ -151,7 +151,7 @@ app.get('/quotex-webhook', async (req, res) => {
     }
 });
 
-// ৮. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (টেলিগ্রামে সরাসরি ফটো ও বাটন প্রেরণ)
+// ৮. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (7 Days, Lifetime, Custom ও Reject বাটনসহ)
 app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     try {
         const { userId, email, txId, plan, method } = req.body;
@@ -170,14 +170,15 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
 
 <i>অ্যাকশন নিতে নিচের যেকোনো বাটনে চাপ দিন:</i>`;
 
+        // 7 Days, Lifetime, Custom এবং Reject বাটন
         const inlineKeyboard = {
             inline_keyboard: [
                 [
                     { text: "✅ 7 Days VIP", callback_data: `approve_7_${email}` },
-                    { text: "⭐ 30 Days VIP", callback_data: `approve_30_${email}` }
+                    { text: "👑 Lifetime VIP", callback_data: `approve_life_${email}` }
                 ],
                 [
-                    { text: "👑 Lifetime VIP", callback_data: `approve_life_${email}` },
+                    { text: "⚙️ Custom Days", callback_data: `custom_${email}` },
                     { text: "❌ Reject", callback_data: `reject_${email}` }
                 ]
             ]
@@ -203,11 +204,11 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     }
 });
 
-// ৯. টেলিগ্রাম ব্যাকগ্রাউন্ড পোলিং লুপ (বাটন ক্লিক ও কমান্ড হ্যান্ডলার)
+// ৯. টেলিগ্রাম ব্যাকগ্রাউন্ড লুপ (বাটন ক্লিক, এক্সপায়ার এবং কাস্টম অনুমোদন হ্যান্ডলার)
 let lastUpdateId = 0;
 async function processUpdate(update) {
     try {
-        // বাটন ক্লিকের হ্যান্ডলিং (Approve / Reject)
+        // ইনলাইন বাটন ক্লিকের হ্যান্ডলিং
         if (update.callback_query) {
             const query = update.callback_query;
             const data = query.data;
@@ -215,7 +216,7 @@ async function processUpdate(update) {
 
             if (data.startsWith('approve_')) {
                 const parts = data.split('_');
-                const type = parts[1];
+                const type = parts[1]; // '7' or 'life'
                 const targetEmail = parts.slice(2).join('_');
 
                 const userSnap = await db.collection('users').where('email', '==', targetEmail).limit(1).get();
@@ -232,10 +233,6 @@ async function processUpdate(update) {
                     const expiry = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
                     updatePayload.vipExpiresAt = expiry.toISOString();
                     durationMsg = "৭ দিনের VIP অ্যাক্সেস";
-                } else if (type === '30') {
-                    const expiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-                    updatePayload.vipExpiresAt = expiry.toISOString();
-                    durationMsg = "৩০ দিনের VIP অ্যাক্সেস";
                 } else if (type === 'life') {
                     updatePayload.vipExpiresAt = null;
                     durationMsg = "লাইফটাইম (Lifetime) VIP অ্যাক্সেস";
@@ -246,8 +243,14 @@ async function processUpdate(update) {
                 const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
                 paySnap.forEach(pDoc => pDoc.ref.update({ status: 'approved' }));
 
-                await sendTelegramMessage(chatId, `✅ <b>সফল!</b>\nইউজার <code>${targetEmail}</code>-কে <b>${durationMsg}</b> দেওয়া হয়েছে।`);
+                await sendTelegramMessage(chatId, `✅ <b>সফল!</b>\nইউজার <code>${targetEmail}</code>-কে <b>${durationMsg}</b> সক্রিয় করে দেওয়া হয়েছে।`);
                 await answerCallbackQuery(query.id, "Approved Successfully!");
+
+            } else if (data.startsWith('custom_')) {
+                const targetEmail = data.replace('custom_', '');
+                const msg = `⚙️ <b>কাস্টম দিন দিতে নিচের কমান্ডটি কপি করে দিন বসিয়ে পাঠান:</b>\n\n<code>/approve ${targetEmail} 15</code>\n\n<i>(১৫-এর জায়গায় যত দিন খুশি সংখ্যা লিখতে পারেন)</i>`;
+                await sendTelegramMessage(chatId, msg);
+                await answerCallbackQuery(query.id, "কমান্ড ফরম্যাট পাঠানো হয়েছে");
 
             } else if (data.startsWith('reject_')) {
                 const targetEmail = data.replace('reject_', '');
@@ -259,7 +262,7 @@ async function processUpdate(update) {
             }
         }
 
-        // অ্যাডমিন কমান্ডের হ্যান্ডলিং (/start, /check, /approve, /ban, /unban, /stats)
+        // অ্যাডমিন কমান্ডের হ্যান্ডলিং (/start, /approve, /expire, /ban, /unban, /check, /stats)
         if (update.message && update.message.text) {
             const msg = update.message;
             const text = msg.text.trim();
@@ -272,33 +275,18 @@ async function processUpdate(update) {
 `👋 <b>JH Trading VIP Admin Bot চালু আছে!</b>
 
 📌 <b>কমান্ড তালিকা:</b>
-• <code>/check &lt;email&gt;</code> - ইউজারের তথ্য ও স্ট্যাটাস দেখুন
-• <code>/approve &lt;email&gt; &lt;days&gt;</code> - সরাসরি VIP দিন (উদা: /approve user@gmail.com 30)
+• <code>/approve &lt;email&gt; &lt;days&gt;</code> - নির্দিষ্ট দিন VIP দিন (উদা: <code>/approve user@gmail.com 15</code>)
+• <code>/expire &lt;email&gt;</code> - ইউজারের VIP মেয়াদ শেষ বা বাতিল করুন (পুনরায় পেমেন্ট/UID লাগবে)
+• <code>/check &lt;email&gt;</code> - প্রোফাইল, VIP মেয়াদ ও UID তথ্য দেখুন
 • <code>/ban &lt;email&gt;</code> - ইউজার ব্যান করুন
 • <code>/unban &lt;email&gt;</code> - ইউজার আনব্যান করুন
 • <code>/stats</code> - মোট ইউজার ও VIP সংখ্যা দেখুন
 
 🔔 সাইটে পেমেন্ট সাবমিট করলে স্ক্রিনশট ও বাটনসহ রিয়েল-টাইম নোটিফিকেশন আসবে।`;
                 await sendTelegramMessage(chatId, welcome);
-            } else if (text.startsWith('/check ')) {
-                const email = text.replace('/check ', '').trim();
-                const snap = await db.collection('users').where('email', '==', email).limit(1).get();
-                if (snap.empty) {
-                    await sendTelegramMessage(chatId, "❌ কোনো ইউজার পাওয়া যায়নি।");
-                } else {
-                    const u = snap.docs[0].data();
-                    const info = 
-`📋 <b>ইউজার প্রোফাইল:</b>
-• নাম: ${u.name || 'N/A'}
-• ইমেইল: <code>${u.email}</code>
-• টেলিগ্রাম: ${u.telegram || 'N/A'}
-• Quotex UID: <code>${u.quotexUID || 'যুক্ত নেই'}</code>
-• VIP স্ট্যাটাস: ${u.vipStatus ? 'ACTIVE 🟢' : 'INACTIVE 🔴'}
-• VIP মেয়াদ: ${u.vipExpiresAt ? new Date(u.vipExpiresAt).toLocaleString() : 'LIFETIME'}
-• ব্যান স্ট্যাটাস: ${u.isBanned ? 'BANNED 🚫' : 'ACTIVE'}`;
-                    await sendTelegramMessage(chatId, info);
-                }
-            } else if (text.startsWith('/approve ')) {
+            } 
+            // কাস্টম দিন অনুমোদন কমান্ড
+            else if (text.startsWith('/approve ')) {
                 const parts = text.split(' ');
                 if (parts.length >= 3) {
                     const email = parts[1].trim();
@@ -313,10 +301,63 @@ async function processUpdate(update) {
                             vipExpiresAt: expiry.toISOString(),
                             isBanned: false
                         });
-                        await sendTelegramMessage(chatId, `✅ <code>${email}</code>-কে ${days} দিনের জন্য VIP অ্যাক্সেস দেওয়া হয়েছে।`);
+
+                        const paySnap = await db.collection('payments').where('email', '==', email).where('status', '==', 'pending').get();
+                        paySnap.forEach(pDoc => pDoc.ref.update({ status: 'approved' }));
+
+                        await sendTelegramMessage(chatId, `✅ <code>${email}</code>-কে সফলভাবে <b>${days} দিনের VIP অ্যাক্সেস</b> দেওয়া হয়েছে।`);
                     }
                 }
-            } else if (text.startsWith('/ban ')) {
+            }
+            // ভিআইপি এক্সপায়ার/বাতিল করার কমান্ড
+            else if (text.startsWith('/expire ')) {
+                const email = text.replace('/expire ', '').trim();
+                const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+                if (snap.empty) {
+                    await sendTelegramMessage(chatId, "❌ ইউজার পাওয়া যায়নি।");
+                } else {
+                    const userDoc = snap.docs[0];
+                    const userData = userDoc.data();
+
+                    // কোটেক্স ট্রেডার্স থেকে বাইন্ডিং রিমুভ করা যাতে আবার নতুন করে ভেরিফাই হতে পারে
+                    if (userData.quotexUID) {
+                        try {
+                            await db.collection('quotex_traders').doc(String(userData.quotexUID)).delete();
+                        } catch (err) {}
+                    }
+
+                    // ইউজারের VIP বন্ধ ও কোটেক্স UID রিসেট করা
+                    await userDoc.ref.update({
+                        vipStatus: false,
+                        vipExpiresAt: null,
+                        quotexUID: null
+                    });
+
+                    await sendTelegramMessage(chatId, `⚠️ <b>VIP বাতিল করা হয়েছে:</b>\nইউজার <code>${email}</code>-এর VIP মেয়াদ এক্সপায়ার করা হয়েছে এবং কোটেক্স বাইন্ডিং রিসেট করা হয়েছে। তাকে সাইটে পুনরায় ডিপোজিট বা পেমেন্ট করতে হবে।`);
+                }
+            }
+            // ইউজার প্রোফাইল চেক
+            else if (text.startsWith('/check ')) {
+                const email = text.replace('/check ', '').trim();
+                const snap = await db.collection('users').where('email', '==', email).limit(1).get();
+                if (snap.empty) {
+                    await sendTelegramMessage(chatId, "❌ কোনো ইউজার পাওয়া যায়নি।");
+                } else {
+                    const u = snap.docs[0].data();
+                    const info = 
+`📋 <b>ইউজার প্রোফাইল:</b>
+• নাম: ${u.name || 'N/A'}
+• ইমেইল: <code>${u.email}</code>
+• টেলিগ্রাম: ${u.telegram || 'N/A'}
+• Quotex UID: <code>${u.quotexUID || 'যুক্ত নেই'}</code>
+• VIP স্ট্যাটাস: ${u.vipStatus ? 'ACTIVE 🟢' : 'INACTIVE 🔴'}
+• VIP মেয়াদ: ${u.vipExpiresAt ? new Date(u.vipExpiresAt).toLocaleString() : (u.vipStatus ? 'LIFETIME' : 'N/A')}
+• ব্যান স্ট্যাটাস: ${u.isBanned ? 'BANNED 🚫' : 'ACTIVE'}`;
+                    await sendTelegramMessage(chatId, info);
+                }
+            } 
+            // ইউজার ব্যান
+            else if (text.startsWith('/ban ')) {
                 const email = text.replace('/ban ', '').trim();
                 const snap = await db.collection('users').where('email', '==', email).limit(1).get();
                 if (snap.empty) {
@@ -325,7 +366,9 @@ async function processUpdate(update) {
                     await snap.docs[0].ref.update({ isBanned: true, vipStatus: false });
                     await sendTelegramMessage(chatId, `🚫 ইউজার ব্যান করা হয়েছে:\n<code>${email}</code>`);
                 }
-            } else if (text.startsWith('/unban ')) {
+            } 
+            // ইউজার আনব্যান
+            else if (text.startsWith('/unban ')) {
                 const email = text.replace('/unban ', '').trim();
                 const snap = await db.collection('users').where('email', '==', email).limit(1).get();
                 if (snap.empty) {
@@ -334,7 +377,9 @@ async function processUpdate(update) {
                     await snap.docs[0].ref.update({ isBanned: false });
                     await sendTelegramMessage(chatId, `✅ ইউজার আনব্যান করা হয়েছে:\n<code>${email}</code>`);
                 }
-            } else if (text === '/stats') {
+            } 
+            // ড্যাশবোর্ড পরিসংখ্যান
+            else if (text === '/stats') {
                 const allUsers = await db.collection('users').get();
                 const vipUsers = await db.collection('users').where('vipStatus', '==', true).get();
                 const quotexTraders = await db.collection('quotex_traders').get();
@@ -352,10 +397,7 @@ async function processUpdate(update) {
 }
 
 async function startPolling() {
-    if (!token) {
-        console.error("CRITICAL: BOT_TOKEN or TELEGRAM_BOT_TOKEN missing!");
-        return;
-    }
+    if (!token) return;
     console.log("Telegram REST Engine Running Smoothly...");
     while (true) {
         try {
