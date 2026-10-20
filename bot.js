@@ -3,7 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const TelegramBot = require('node-telegram-bot-api');
-const admin = require('firebase-admin');
+const { initializeApp, cert, getApps } = require('firebase-admin/app');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 
 // ১. এক্সপ্রেস অ্যাপ ইনিশিয়ালাইজেশন
 const app = express();
@@ -11,37 +12,45 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ২. Multer মেমোরি স্টোরেজ সেটআপ (ছবি ফায়ারবেসে জমা না হয়ে মেমোরিতে থাকবে)
+// ২. Multer মেমোরি স্টোরেজ সেটআপ (ছবি ফায়ারবেসে জমা না হয়ে মেমোরিতে প্রসেস হবে)
 const storage = multer.memoryStorage();
 const upload = multer({
     storage: storage,
     limits: { fileSize: 10 * 1024 * 1024 } // সর্বোচ্চ ১০ মেগাবাইট ফাইল
 });
 
-// ৩. ফায়ারবেস অ্যাডমিন SDK সেটআপ
+// ৩. ফায়ারবেস অ্যাডমিন SDK ইনিশিয়ালাইজেশন
 let serviceAccount;
 try {
     if (process.env.FIREBASE_SERVICE_ACCOUNT) {
-        serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+        serviceAccount = typeof process.env.FIREBASE_SERVICE_ACCOUNT === 'string'
+            ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
+            : process.env.FIREBASE_SERVICE_ACCOUNT;
     } else {
         serviceAccount = require('./serviceAccountKey.json');
     }
     
-    admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount)
-    });
+    if (!getApps().length) {
+        initializeApp({
+            credential: cert(serviceAccount)
+        });
+    }
     console.log("Firebase Admin SDK Connected Successfully.");
 } catch (error) {
     console.error("Firebase Admin SDK Init Error:", error.message);
 }
 
-const db = admin.firestore();
+const db = getFirestore();
 
-// ৪. টেলিগ্রাম বট ইনিশিয়ালাইজেশন
-const token = process.env.TELEGRAM_BOT_TOKEN;
+// ৪. টেলিগ্রাম বট ইনিশিয়ালাইজেশন (TELEGRAM_BOT_TOKEN অথবা BOT_TOKEN উভয়েই কাজ করবে)
+const token = process.env.TELEGRAM_BOT_TOKEN || process.env.BOT_TOKEN;
 const adminChatId = process.env.ADMIN_CHAT_ID;
-const bot = new TelegramBot(token, { polling: true });
 
+if (!token) {
+    console.error("WARNING: TELEGRAM_BOT_TOKEN or BOT_TOKEN missing in environment variables!");
+}
+
+const bot = new TelegramBot(token, { polling: true });
 console.log("Telegram Bot Engine Started...");
 
 // ৫. UptimeRobot মনিটরিং রুট (200 OK নিশ্চিত রাখতে)
@@ -71,7 +80,7 @@ app.get('/quotex-webhook', async (req, res) => {
                 hasDeposit: hasBalance,
                 totalDeposit: depositNum,
                 lastStatus: status || 'updated',
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                lastUpdated: FieldValue.serverTimestamp()
             });
         } else {
             await traderRef.set({
@@ -79,8 +88,8 @@ app.get('/quotex-webhook', async (req, res) => {
                 isAffiliate: true,
                 hasDeposit: hasBalance,
                 totalDeposit: depositNum,
-                registeredAt: admin.firestore.FieldValue.serverTimestamp(),
-                lastUpdated: admin.firestore.FieldValue.serverTimestamp()
+                registeredAt: FieldValue.serverTimestamp(),
+                lastUpdated: FieldValue.serverTimestamp()
             });
         }
 
@@ -91,7 +100,7 @@ app.get('/quotex-webhook', async (req, res) => {
     }
 });
 
-// ৭. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (টেলিগ্রামে সরাসরি ছবি পাঠানো)
+// ৭. পেমেন্ট ও স্ক্রিনশট রিসিভ এন্ডপয়েন্ট (টেলিগ্রামে সরাসরি ছবি ও ক্যাপশন পাঠানো)
 app.post('/submit-payment', upload.single('photo'), async (req, res) => {
     try {
         const { userId, email, txId, plan, method } = req.body;
@@ -99,7 +108,6 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
 
         console.log(`[Payment Received] User: ${email}, TxID: ${txId}, Plan: ${plan}`);
 
-        // টেলিগ্রাম মেসেজের সুন্দর ক্যাপশন প্রস্তুত
         const captionText = 
 `🔔 <b>নতুন VIP সাবস্ক্রিপশন পেমেন্ট এসেছে!</b>
 
@@ -111,7 +119,6 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
 
 <i>অ্যাকশন নিতে নিচের যেকোনো বাটনে চাপ দিন:</i>`;
 
-        // টেলিগ্রাম ইনলাইন অ্যাকশন বাটন
         const inlineKeyboard = {
             inline_keyboard: [
                 [
@@ -125,7 +132,6 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
             ]
         };
 
-        // যদি স্ক্রিনশট ফাইল থাকে, তবে টেলিগ্রাম sendPhoto API দিয়ে সরাসরি ফটো পাঠানো
         if (photoFile && photoFile.buffer) {
             await bot.sendPhoto(adminChatId, photoFile.buffer, {
                 caption: captionText,
@@ -136,7 +142,6 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
                 contentType: photoFile.mimetype || 'image/jpeg'
             });
         } else {
-            // ছবি ছাড়া সাবমিট হলে সাধারণ টেক্সট পাঠানো
             await bot.sendMessage(adminChatId, captionText, {
                 parse_mode: 'HTML',
                 reply_markup: inlineKeyboard
@@ -153,7 +158,6 @@ app.post('/submit-payment', upload.single('photo'), async (req, res) => {
 // ৮. টেলিগ্রাম বট বাটন অ্যাকশন হ্যান্ডলার (Approve / Reject)
 bot.on('callback_query', async (query) => {
     const data = query.data;
-    const msgId = query.message.message_id;
     const chatId = query.message.chat.id;
 
     try {
@@ -162,7 +166,6 @@ bot.on('callback_query', async (query) => {
             const type = parts[1]; // '7', '30', or 'life'
             const targetEmail = parts.slice(2).join('_');
 
-            // ইউজার খোঁজা
             const userSnap = await db.collection('users').where('email', '==', targetEmail).limit(1).get();
             if (userSnap.empty) {
                 return bot.sendMessage(chatId, `❌ ইউজার পাওয়া যায়নি: ${targetEmail}`);
@@ -190,7 +193,6 @@ bot.on('callback_query', async (query) => {
 
             await userDoc.ref.update(updatePayload);
 
-            // পেমেন্ট কালেকশনের স্ট্যাটাস approved করা
             const paySnap = await db.collection('payments').where('email', '==', targetEmail).where('status', '==', 'pending').get();
             paySnap.forEach(pDoc => pDoc.ref.update({ status: 'approved' }));
 
@@ -212,7 +214,7 @@ bot.on('callback_query', async (query) => {
     }
 });
 
-// ৯. অ্যাডমিন কমান্ড তালিকা (/start, /approve, /ban, /unban, /check, /stats)
+// ৯. অ্যাডমিন কমান্ড তালিকা
 bot.onText(/\/start/, (msg) => {
     if (String(msg.chat.id) !== String(adminChatId)) return;
     const welcome = 
